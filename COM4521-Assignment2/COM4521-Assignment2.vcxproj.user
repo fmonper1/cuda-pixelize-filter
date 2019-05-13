@@ -5,7 +5,7 @@
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LocalDebuggerCommandArguments>16 CUDA -i Dog2048x2048.ppm -o Mosaic.ppm</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArguments>32 CUDA -i Dog2048x2048.ppm -o Mosaic.ppm</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
 </Project>

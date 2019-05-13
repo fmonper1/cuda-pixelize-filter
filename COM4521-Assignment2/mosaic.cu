@@ -20,6 +20,9 @@ int process_output_file(int tile_size);
 int process_to_mosaic(int tile_size);
 int process_ppm_file(FILE *file, int total_size);
 int process_ppm_header(FILE *file);
+int do_cpu(FILE *file, int tilse_size);
+int do_cuda_processing(int height, int width, int tile_size);
+void transform_1D_to_2D(unsigned char* out_array_r, unsigned char* out_array_g, unsigned char* out_array_b, int width, int height);
 
 int IS_BINARY_MODE = 0;
 
@@ -288,8 +291,6 @@ int process_output_file(int tile_size) {
 			for (int j = 0; j < width; j++) {
 				for (int j2 = 0; j2 < tile_size; j2++) {
 					// Multiply i and j by the tile size to skip to the desired pixel
-					int new_i = i*tile_size;
-					int new_j = j*tile_size;
 					if (&tile_array[i][j] == NULL)
 						return FAILURE;
 
@@ -527,14 +528,12 @@ int openmp_process_output_file(int tile_size) {
 		return FAILURE;
 	}
 
-	int i, i2, j, j2, new_i, new_j;
+	int i, i2, j, j2;
 	for (i = 0; i < height; i++) {
 		for (i2 = 0; i2 < tile_size; i2++) {
 			for (j = 0; j < width; j++) {
 				for (j2 = 0; j2 < tile_size; j2++) {
 					// Multiply i and j by the tile size to skip to the desired pixel
-					new_i = i*tile_size;
-					new_j = j*tile_size;
 					if (&tile_array[i][j] == NULL)
 						return FAILURE;
 
@@ -619,10 +618,8 @@ int process_command_line(int argc, char *argv[]) {
 	output_file = argv[6];
 	//printf(argv[6]);
 
-
 	return SUCCESS;
 }
-int theCount;
 
 void transform_1D_to_2D(unsigned char* out_array_r, unsigned char* out_array_g, unsigned char* out_array_b, int width, int height) {
 	int theCount = 0;
@@ -643,46 +640,16 @@ void transform_1D_to_2D(unsigned char* out_array_r, unsigned char* out_array_g, 
 	}
 }
 
-__device__ int gpu_total_r = 0, gpu_total_g = 0, gpu_total_b = 0;
-
+__device__ unsigned long long gpu_total_r = 0, gpu_total_g = 0, gpu_total_b = 0;
 
 __global__ void get_image_averages(uchar3* gpu_image, int width, int height, int c) {
-	/*
-	extern __shared__ device_PPMPixel shared_data[];
-
 	// each thread loads one element from global to shared mem
-	unsigned int tid = threadIdx.x;
+	//unsigned int tid = threadIdx.x;
 	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
-	shared_data[tid].red = (unsigned int) gpu_array_r[i];
-	shared_data[tid].green = (unsigned int) gpu_array_g[i];
-	shared_data[tid].blue = (unsigned int) gpu_array_b[i];
-	__syncthreads();
-	//printf("thread %d, value %d", i, gpu_array_r[i]);
 
-	for(unsigned int stride = blockDim.x/2; stride >0; stride>>=1){
-		if (threadIdx.x > stride) {
-			shared_data[tid].red += shared_data[tid + stride].red;
-			shared_data[tid].green += shared_data[tid + stride].green;
-			shared_data[tid].blue += shared_data[tid + stride].blue;
-		}
-		__syncthreads();
-	}
-
-	if (threadIdx.x == 0) {
-		atomicAdd(&gpu_total_r, shared_data[0].red);
-		atomicAdd(&gpu_total_g, shared_data[0].green);
-		atomicAdd(&gpu_total_b, shared_data[0].blue);
-	}*/
-
-	// each thread loads one element from global to shared mem
-	unsigned int tid = threadIdx.x;
-	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
-	//sdata_r[tid] = gpu_array_r[i];
-	//printf("thread %d, value %d", i, gpu_array_r[i]);
-
-	atomicAdd(&gpu_total_r, gpu_image[i].x);
-	atomicAdd(&gpu_total_g, gpu_image[i].y);
-	atomicAdd(&gpu_total_b, gpu_image[i].z);
+	atomicAdd(&gpu_total_r, (unsigned long long) gpu_image[i].x);
+	atomicAdd(&gpu_total_g, (unsigned long long) gpu_image[i].y);
+	atomicAdd(&gpu_total_b, (unsigned long long) gpu_image[i].z);
 }
 
 
@@ -698,12 +665,12 @@ __global__ void cuda_image_pixelize(uchar3* gpu_image, int width, int height, in
 		for (int i = 0; i < tilesize; i++) {
 			for (int j = 0; j < tilesize; j++) {
 				int index = output_offset + i + (j*height);
-				avg_r += gpu_image[index].x;
-				avg_g += gpu_image[index].y;
-				avg_b += gpu_image[index].z;
+				uchar3 pixel = gpu_image[index];
+				avg_r += pixel.x;
+				avg_g += pixel.y;
+				avg_b += pixel.z;
 			}
 		}
-
 		__syncthreads();
 		for (int i = 0; i < tilesize; i++) {
 			for (int j = 0; j < tilesize; j++) {
@@ -713,30 +680,20 @@ __global__ void cuda_image_pixelize(uchar3* gpu_image, int width, int height, in
 				gpu_image[out_index].y = (unsigned char)(avg_g / totalsize);
 				gpu_image[out_index].z = (unsigned char)(avg_b / totalsize);
 
-				//printf("out @ idx %d: r %d, g %d, b %d \n", out_index, gpu_out_r[out_index], gpu_out_g[out_index], gpu_out_b[out_index]);
 			}
 		}
-		/*__syncthreads();
-		if (x == 0) {
-			printf("0 out r %d, g %d, b %d \n", gpu_out_r[0], gpu_out_g[0], gpu_out_b[0]);
-			printf("1 out r %d, g %d, b %d \n", gpu_out_r[1], gpu_out_g[1], gpu_out_b[1]);
-			printf("2 out r %d, g %d, b %d \n", gpu_out_r[2], gpu_out_g[2], gpu_out_b[2]);
-			printf("3 out r %d, g %d, b %d \n", gpu_out_r[3], gpu_out_g[3], gpu_out_b[3]);
-			printf("4 out r %d, g %d, b %d \n", gpu_out_r[4], gpu_out_g[4], gpu_out_b[4]);
-		}*/
 	}
 }
 
 int do_cuda_processing(int height, int width, int tile_size) {
 	cudaEvent_t start, stop;
 	float mseconds;
-
 	uchar3 *cpu_pixel;
 	uchar3 *gpu_pixel;
-
-	// Pointers in the GPU
-	/*unsigned char *gpu_array_r, *gpu_array_g, *gpu_array_b;
-	unsigned char *gpu_out_r, *gpu_out_g, *gpu_out_b;*/
+	//cuda layout and execution
+	dim3 blocksPerGrid2(width / 16, height / 16);
+	dim3 threadsPerBlock2(16, 16);
+	unsigned long long total_r, total_b, total_g;
 
 	// Allocate memory for the arrays of R, G, B values that are going to be produced
 	out_array_r = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
@@ -745,8 +702,8 @@ int do_cuda_processing(int height, int width, int tile_size) {
 
 	// Optimization: User uchar3 to keep rgb values coalesced in memory. 
 	// We have to copy them from the three arrays into one
-	
 	cpu_pixel = (uchar3*)malloc(sizeof(uchar3)*(width)*(height));
+
 	// Copy the r,g,b arrays into the uchar3
 	for (int i = 0; i < width*height; i++) {
 		cpu_pixel[i].x = image_array_r[i];
@@ -754,6 +711,7 @@ int do_cuda_processing(int height, int width, int tile_size) {
 		cpu_pixel[i].z = image_array_b[i];
 	}
 
+	printf("width %d, height %d \n", width, height);
 	// create timers
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
@@ -762,63 +720,29 @@ int do_cuda_processing(int height, int width, int tile_size) {
 	cudaEventRecord(start, 0);
 
 	// Allocate memory in GPU
-		// Initial implementation
-		//cudaMalloc((void**)&gpu_array_r, sizeof(unsigned char)*(width)*(height));
-		//cudaMalloc((void**)&gpu_array_g, sizeof(unsigned char)*(width)*(height));
-		//cudaMalloc((void**)&gpu_array_b, sizeof(unsigned char)*(width)*(height));
-		//cudaMalloc((void**)&gpu_out_r, sizeof(unsigned char)*(width)*(height ));
-		//cudaMalloc((void**)&gpu_out_g, sizeof(unsigned char)*(width )*(height));
-		//cudaMalloc((void**)&gpu_out_b, sizeof(unsigned char)*(width)*(height));
 	cudaMalloc((void**)&gpu_pixel, sizeof(uchar3)*(width)*(height));
 
 	// Copy data into GPU memory
-		// Initial implementation
-		//cudaMemcpy(gpu_array_r, image_array_r, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
-		//cudaMemcpy(gpu_array_g, image_array_g, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
-		//cudaMemcpy(gpu_array_b, image_array_b, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
 	cudaMemcpy(gpu_pixel, cpu_pixel, sizeof(uchar3)*(width)*(height), cudaMemcpyHostToDevice);
 
-	//cuda layout and execution
-	dim3 blocksPerGrid((width*height) / tile_size, 1, 1);
-	dim3 threadsPerBlock(tile_size, 1, 1);
-	dim3 blocksPerGrid2(width / 16, height / 16);
-	dim3 threadsPerBlock2(16, 16);
-
-	printf("width %d, height %d \n", width, height);
-
-	size_t memory_shared = (width / tile_size) * sizeof(uint3);
-
-	//printf(sizeof(&image_array_r));
-	
-	//cudaDeviceSynchronize();
+	printf("getting image average...\n");
+	get_image_averages <<<blocksPerGrid2, threadsPerBlock2 >>>(gpu_pixel, width, height, tile_size);
 
 	printf("pixelating image...\n");
 	cuda_image_pixelize <<<blocksPerGrid2, threadsPerBlock2 >>>(gpu_pixel, width, height, tile_size);
 	cudaDeviceSynchronize();
+
 	printf("done pixelating...\n");
 
-	printf("getting image average...\n");
-	get_image_averages <<<blocksPerGrid2, threadsPerBlock2, memory_shared >>>(gpu_pixel, width, height, tile_size);
-
-	int total_r, total_b, total_g;
 	//cudaMemcpyToSymbol(&gpu_total_r, &total_r, sizeof(int));
 
-	cudaMemcpyFromSymbol(&total_r, gpu_total_r, sizeof(int));
-	cudaMemcpyFromSymbol(&total_g, gpu_total_g, sizeof(int));
-	cudaMemcpyFromSymbol(&total_b, gpu_total_b, sizeof(int));
+	cudaMemcpyFromSymbol(&total_r, gpu_total_r, sizeof(unsigned long long));
+	cudaMemcpyFromSymbol(&total_g, gpu_total_g, sizeof(unsigned long long));
+	cudaMemcpyFromSymbol(&total_b, gpu_total_b, sizeof(unsigned long long));
 	printf("done memcopy1\n");
 
 	// Copy data back from gpu
 	cudaMemcpy(cpu_pixel, gpu_pixel, sizeof(uchar3)*(width)*(height), cudaMemcpyDeviceToHost);
-		// Initial implementation
-		/*cudaMemcpy(image_array_r, gpu_array_r, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
-		cudaMemcpy(image_array_g, gpu_array_g, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
-		cudaMemcpy(image_array_b, gpu_array_b, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
-		printf("done memcopy2\n");*/
-		/*cudaMemcpy(out_array_r, gpu_out_r, sizeof(unsigned char)*(width)*(height ), cudaMemcpyDeviceToHost);
-		cudaMemcpy(out_array_g, gpu_out_g, sizeof(unsigned char)*(width )*(height ), cudaMemcpyDeviceToHost);
-		cudaMemcpy(out_array_b, gpu_out_b, sizeof(unsigned char)*(width )*(height ), cudaMemcpyDeviceToHost);
-		printf("done memcopy3\n");*/
 
 	// end timing here
 	cudaEventRecord(stop, 0);
@@ -827,9 +751,9 @@ int do_cuda_processing(int height, int width, int tile_size) {
 
 	printf("CUDA mode execution time took %d s and %d ms\n", (int)mseconds / 1000, (int)mseconds % 1000);
 
-	printf("cpu_average_r total is %i \n", total_r / (width*height));
-	printf("cpu_average_g total is %i \n", total_g / (width*height));
-	printf("cpu_average_b total is %i \n", total_b / (width*height));
+	printf("cpu_average_r total is %d \n", total_r / (width*height));
+	printf("cpu_average_g total is %d \n", total_g / (width*height));
+	printf("cpu_average_b total is %d \n", total_b / (width*height));
 
 	// Improvement
 	// Copy data back to the initial format so that the output function still works
@@ -840,13 +764,6 @@ int do_cuda_processing(int height, int width, int tile_size) {
 	}
 
 	// Free GPU memory
-		// First implementation
-		/*cudaFree(gpu_array_r);
-		cudaFree(gpu_array_g);
-		cudaFree(gpu_array_b);
-		cudaFree(gpu_out_r);
-		cudaFree(gpu_out_g);
-		cudaFree(gpu_out_b);*/
 	cudaFree(gpu_pixel);
 	free(cpu_pixel);
 
@@ -854,6 +771,37 @@ int do_cuda_processing(int height, int width, int tile_size) {
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
 	cudaDeviceReset();
+	return SUCCESS;
+}
+
+int do_cpu(FILE *file, int tilse_size) {
+	//TODO: starting timing here
+	clock_t begin, end;
+	float mseconds;
+	begin = clock();
+
+	if (get_average_color_values(file) == FAILURE) {
+		printf("There was a problem averaging the colours");
+	}
+
+	if (process_to_mosaic(tile_size) == FAILURE) {
+		printf("There was a problem processing the output file");
+	}
+
+	// Output the average colour value for the image
+	printf("CPU Average image colour red = %d, green = %d, blue = %d \n", average_r, average_g, average_b);
+
+	//TODO: end timing here
+
+	end = clock();
+	mseconds = (end - begin) * 1000 / (float)CLOCKS_PER_SEC;
+	printf("CPU mode execution time took %d s and %d ms\n", (int)mseconds / 1000, (int)mseconds % 1000);
+	// starting timing here
+
+	if (process_output_file(tile_size) == FAILURE) {
+		printf("There was a problem processing the output file");
+	}
+
 	return SUCCESS;
 }
 
@@ -865,7 +813,7 @@ int main(int argc, char *argv[]) {
 	FILE *file;
 	file = fopen(file_name, "rb");
 
-	if (process_ppm_header(file) != SUCCESS) {
+	if (process_ppm_header(file) == FAILURE) {
 		printf("There was a problem processing the file header");
 		exit(FAILURE);
 	}
@@ -876,7 +824,7 @@ int main(int argc, char *argv[]) {
 		exit(FAILURE);
 	}
 
-	if (tile_size > *(&image->width) || tile_size > *(&image->height)) {
+	if (tile_size > (unsigned int) *(&image->width) || tile_size >(unsigned int) *(&image->height)) {
 		printf("You cant enter a mosaic size bigger than the actual image");
 		exit(FAILURE);
 	}
@@ -884,13 +832,14 @@ int main(int argc, char *argv[]) {
 	//TODO: execute the mosaic filter based on the mode
 	switch (execution_mode) {
 		case (CPU): {
+			do_cpu(file, tile_size);
 			//TODO: starting timing here
-			start_timer = omp_get_wtime();
-			if (get_average_color_values(file) != SUCCESS) {
+			/*start_timer = omp_get_wtime();
+			if (get_average_color_values(file) == FAILURE) {
 				printf("There was a problem averaging the colours");
 			}
 
-			if (process_to_mosaic(tile_size) != SUCCESS) {
+			if (process_to_mosaic(tile_size) == FAILURE) {
 				printf("There was a problem processing the output file");
 			}
 
@@ -903,19 +852,19 @@ int main(int argc, char *argv[]) {
 			double milisecs = (timer - seconds) * 1000;
 			printf("CPU mode execution time took %d s and %f ms\n", seconds, milisecs);
 
-			if (process_output_file(tile_size) != SUCCESS) {
+			if (process_output_file(tile_size) == FAILURE) {
 				printf("There was a problem processing the output file");
-			}
+			}*/
 			break;
 		}
 		case (OPENMP): {
 			//TODO: starting timing here
 			start_timer = omp_get_wtime();
 
-			if (openmp_get_average_color_values(file) != SUCCESS) {
+			if (openmp_get_average_color_values(file) == FAILURE) {
 
 			}
-			if (openmp_process_to_mosaic(tile_size) != SUCCESS) {
+			if (openmp_process_to_mosaic(tile_size) == FAILURE) {
 				printf("There was a problem processing the output file");
 			}
 
@@ -927,7 +876,7 @@ int main(int argc, char *argv[]) {
 			int seconds = (int)timer;
 			double milisecs = (timer - seconds) * 1000;
 			printf("OPENMP mode execution time took %d s and %fms\n", seconds, milisecs);
-			if (openmp_process_output_file(tile_size) != SUCCESS) {
+			if (openmp_process_output_file(tile_size) == FAILURE) {
 				printf("There was a problem processing the output file");
 			}
 			break;
@@ -944,14 +893,75 @@ int main(int argc, char *argv[]) {
 			transform_1D_to_2D(out_array_r, out_array_g, out_array_b, *(&image->width), *(&image->height));
 
 			printf("processing output file \n");
-			if (cuda_process_output_file(tile_size) != SUCCESS) {
+			if (cuda_process_output_file(tile_size) == FAILURE) {
 				printf("There was a problem processing the output file");
 			}
-			//getchar();
 			break;
 		}
 		case (ALL): {
-			//TODO
+			//TODO: starting timing here
+			printf("------------------------------- \n");
+			printf("      Launching CPU Mode \n");
+			printf("------------------------------- \n");
+			start_timer = omp_get_wtime();
+			if (get_average_color_values(file) == FAILURE) {
+				printf("There was a problem averaging the colours");
+			}
+
+			if (process_to_mosaic(tile_size) == FAILURE) {
+				printf("There was a problem processing the output file");
+			}
+
+			// Output the average colour value for the image
+			printf("CPU Average image colour red = %d, green = %d, blue = %d \n", average_r, average_g, average_b);
+
+			//TODO: end timing here
+			timer = omp_get_wtime() - start_timer;
+			int seconds = (int)timer;
+			double milisecs = (timer - seconds) * 1000;
+			printf("CPU mode execution time took %d s and %f ms\n", seconds, milisecs);
+
+			if (process_output_file(tile_size) == FAILURE) {
+				printf("There was a problem processing the output file");
+			}
+
+			printf("------------------------------- \n");
+			printf("    Launching OPENMP Mode \n");
+			printf("------------------------------- \n");
+			//TODO: starting timing here
+			start_timer = omp_get_wtime();
+
+			if (openmp_get_average_color_values(file) == FAILURE) {
+
+			}
+			if (openmp_process_to_mosaic(tile_size) == FAILURE) {
+				printf("There was a problem processing the output file");
+			}
+
+			// Output the average colour value for the image
+			printf("OPENMP Average image colour red = %d, green = %d, blue = %d \n", average_r, average_g, average_b);
+
+			//TODO: end timing here
+			timer = omp_get_wtime() - start_timer;
+			printf("OPENMP mode execution time took %d s and %fms\n", seconds, milisecs);
+			if (openmp_process_output_file(tile_size) == FAILURE) {
+				printf("There was a problem processing the output file");
+			}
+
+			printf("------------------------------- \n");
+			printf("      Launching CUDA Mode \n");
+			printf("------------------------------- \n");
+			convert_struct_into_arrays();
+
+			do_cuda_processing(*(&image->width), *(&image->height), tile_size);
+
+			printf("transforming 1d to 2d \n");
+			transform_1D_to_2D(out_array_r, out_array_g, out_array_b, *(&image->width), *(&image->height));
+
+			printf("processing output file \n");
+			if (cuda_process_output_file(tile_size) == FAILURE) {
+				printf("There was a problem processing the output file");
+			}
 			break;
 		}
 	}
@@ -959,6 +969,7 @@ int main(int argc, char *argv[]) {
 	free(image_array);
 
 	free(tile_array);
+	getchar();
 
 	//save the output image file (from last executed mode)
 	return 0;
