@@ -168,6 +168,9 @@ int convert_struct_into_arrays() {
 	image_array_r = (unsigned char *)malloc(height * width * sizeof(unsigned char));
 	image_array_g = (unsigned char *)malloc(height * width * sizeof(unsigned char));
 	image_array_b = (unsigned char *)malloc(height * width * sizeof(unsigned char));
+	//image_array_1d = (unsigned char *)malloc(height * width * sizeof(PPMPixel));
+	// Allocate memory for a temporary 2D array to average colour of pixels
+
 	int count = 0;
 	for (int i = 0; i < width; i++) {
 		for (int j = 0; j < height; j++) {
@@ -643,7 +646,7 @@ void transform_1D_to_2D(unsigned char* out_array_r, unsigned char* out_array_g, 
 __device__ int gpu_total_r = 0, gpu_total_g = 0, gpu_total_b = 0;
 
 
-__global__ void get_image_averages(unsigned char* gpu_array_r, unsigned char* gpu_array_g, unsigned char* gpu_array_b, int width, int height, int c) {
+__global__ void get_image_averages(uchar3* gpu_image, int width, int height, int c) {
 	/*
 	extern __shared__ device_PPMPixel shared_data[];
 
@@ -677,14 +680,14 @@ __global__ void get_image_averages(unsigned char* gpu_array_r, unsigned char* gp
 	//sdata_r[tid] = gpu_array_r[i];
 	//printf("thread %d, value %d", i, gpu_array_r[i]);
 
-	atomicAdd(&gpu_total_r, gpu_array_r[i]);
-	atomicAdd(&gpu_total_g, gpu_array_g[i]);
-	atomicAdd(&gpu_total_b, gpu_array_b[i]);
+	atomicAdd(&gpu_total_r, gpu_image[i].x);
+	atomicAdd(&gpu_total_g, gpu_image[i].y);
+	atomicAdd(&gpu_total_b, gpu_image[i].z);
 }
 
 
 
-__global__ void cuda_image_pixelize(unsigned char* gpu_array_r, unsigned char* gpu_array_g, unsigned char* gpu_array_b, unsigned char* gpu_out_r, unsigned char* gpu_out_g, unsigned char* gpu_out_b, int width, int height, int tilesize) {
+__global__ void cuda_image_pixelize(uchar3* gpu_image, int width, int height, int tilesize) {
 	// map from threadIdx/BlockIdx to pixel position
 	int x = threadIdx.x + blockIdx.x * blockDim.x;
 	int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -695,9 +698,9 @@ __global__ void cuda_image_pixelize(unsigned char* gpu_array_r, unsigned char* g
 		for (int i = 0; i < tilesize; i++) {
 			for (int j = 0; j < tilesize; j++) {
 				int index = output_offset + i + (j*height);
-				avg_r += gpu_array_r[index];
-				avg_g += gpu_array_g[index];
-				avg_b += gpu_array_b[index];
+				avg_r += gpu_image[index].x;
+				avg_g += gpu_image[index].y;
+				avg_b += gpu_image[index].z;
 			}
 		}
 
@@ -706,9 +709,9 @@ __global__ void cuda_image_pixelize(unsigned char* gpu_array_r, unsigned char* g
 			for (int j = 0; j < tilesize; j++) {
 				int out_index = output_offset + i + (j * height);
 				//printf("out: %d \n",out_index);
-				gpu_out_r[out_index] = (unsigned char)(avg_r / totalsize);
-				gpu_out_g[out_index] = (unsigned char)(avg_g / totalsize);
-				gpu_out_b[out_index] = (unsigned char)(avg_b / totalsize);
+				gpu_image[out_index].x = (unsigned char)(avg_r / totalsize);
+				gpu_image[out_index].y = (unsigned char)(avg_g / totalsize);
+				gpu_image[out_index].z = (unsigned char)(avg_b / totalsize);
 
 				//printf("out @ idx %d: r %d, g %d, b %d \n", out_index, gpu_out_r[out_index], gpu_out_g[out_index], gpu_out_b[out_index]);
 			}
@@ -728,6 +731,29 @@ int do_cuda_processing(int height, int width, int tile_size) {
 	cudaEvent_t start, stop;
 	float mseconds;
 
+	uchar3 *cpu_pixel;
+	uchar3 *gpu_pixel;
+
+	// Pointers in the GPU
+	/*unsigned char *gpu_array_r, *gpu_array_g, *gpu_array_b;
+	unsigned char *gpu_out_r, *gpu_out_g, *gpu_out_b;*/
+
+	// Allocate memory for the arrays of R, G, B values that are going to be produced
+	out_array_r = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
+	out_array_g = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
+	out_array_b = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
+
+	// Optimization: User uchar3 to keep rgb values coalesced in memory. 
+	// We have to copy them from the three arrays into one
+	
+	cpu_pixel = (uchar3*)malloc(sizeof(uchar3)*(width)*(height));
+	// Copy the r,g,b arrays into the uchar3
+	for (int i = 0; i < width*height; i++) {
+		cpu_pixel[i].x = image_array_r[i];
+		cpu_pixel[i].y = image_array_g[i];
+		cpu_pixel[i].z = image_array_b[i];
+	}
+
 	// create timers
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
@@ -735,29 +761,23 @@ int do_cuda_processing(int height, int width, int tile_size) {
 	// starting timing here
 	cudaEventRecord(start, 0);
 
-	//Declare GPU pointer
-	unsigned char *gpu_array_r, *gpu_array_g, *gpu_array_b;
-	unsigned char *gpu_out_r, *gpu_out_g, *gpu_out_b;
-
 	// Allocate memory in GPU
-	cudaMalloc((void**)&gpu_array_r, sizeof(unsigned char)*(width)*(height));
-	cudaMalloc((void**)&gpu_array_g, sizeof(unsigned char)*(width)*(height));
-	cudaMalloc((void**)&gpu_array_b, sizeof(unsigned char)*(width)*(height));
-	cudaMalloc((void**)&gpu_out_r, sizeof(unsigned char)*(width)*(height ));
-	cudaMalloc((void**)&gpu_out_g, sizeof(unsigned char)*(width )*(height));
-	cudaMalloc((void**)&gpu_out_b, sizeof(unsigned char)*(width )*(height ));
-
-	out_array_r = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
-	out_array_g = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
-	out_array_b = (unsigned char *)malloc((width)*(height) * sizeof(unsigned char));
+		// Initial implementation
+		//cudaMalloc((void**)&gpu_array_r, sizeof(unsigned char)*(width)*(height));
+		//cudaMalloc((void**)&gpu_array_g, sizeof(unsigned char)*(width)*(height));
+		//cudaMalloc((void**)&gpu_array_b, sizeof(unsigned char)*(width)*(height));
+		//cudaMalloc((void**)&gpu_out_r, sizeof(unsigned char)*(width)*(height ));
+		//cudaMalloc((void**)&gpu_out_g, sizeof(unsigned char)*(width )*(height));
+		//cudaMalloc((void**)&gpu_out_b, sizeof(unsigned char)*(width)*(height));
+	cudaMalloc((void**)&gpu_pixel, sizeof(uchar3)*(width)*(height));
 
 	// Copy data into GPU memory
-	cudaMemcpy(gpu_array_r, image_array_r, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
-	cudaMemcpy(gpu_array_g, image_array_g, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
-	cudaMemcpy(gpu_array_b, image_array_b, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
+		// Initial implementation
+		//cudaMemcpy(gpu_array_r, image_array_r, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
+		//cudaMemcpy(gpu_array_g, image_array_g, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
+		//cudaMemcpy(gpu_array_b, image_array_b, sizeof(unsigned char)*(width)*(height), cudaMemcpyHostToDevice);
+	cudaMemcpy(gpu_pixel, cpu_pixel, sizeof(uchar3)*(width)*(height), cudaMemcpyHostToDevice);
 
-	//int section_width = (width % c == 0) ? width / c : width / c + 1;
-	//int section_height = (height % c == 0) ? height / c : height / c + 1;
 	//cuda layout and execution
 	dim3 blocksPerGrid((width*height) / tile_size, 1, 1);
 	dim3 threadsPerBlock(tile_size, 1, 1);
@@ -766,19 +786,19 @@ int do_cuda_processing(int height, int width, int tile_size) {
 
 	printf("width %d, height %d \n", width, height);
 
-	size_t memory_shared = (width / tile_size) * sizeof(device_PPMPixel);
+	size_t memory_shared = (width / tile_size) * sizeof(uint3);
 
 	//printf(sizeof(&image_array_r));
-	printf("getting image average \n");
-	get_image_averages << <blocksPerGrid, threadsPerBlock , memory_shared>> >(gpu_array_r, gpu_array_g, gpu_array_b, width, height, tile_size);
 	
 	//cudaDeviceSynchronize();
 
-	printf("pixelating image\n");
-	cuda_image_pixelize << <blocksPerGrid2, threadsPerBlock2 >> >(gpu_array_r, gpu_array_g, gpu_array_b, gpu_out_r, gpu_out_g, gpu_out_b, width, height, tile_size);
+	printf("pixelating image...\n");
+	cuda_image_pixelize <<<blocksPerGrid2, threadsPerBlock2 >>>(gpu_pixel, width, height, tile_size);
 	cudaDeviceSynchronize();
+	printf("done pixelating...\n");
 
-	printf("done pixelating\n");
+	printf("getting image average...\n");
+	get_image_averages <<<blocksPerGrid2, threadsPerBlock2, memory_shared >>>(gpu_pixel, width, height, tile_size);
 
 	int total_r, total_b, total_g;
 	//cudaMemcpyToSymbol(&gpu_total_r, &total_r, sizeof(int));
@@ -788,34 +808,47 @@ int do_cuda_processing(int height, int width, int tile_size) {
 	cudaMemcpyFromSymbol(&total_b, gpu_total_b, sizeof(int));
 	printf("done memcopy1\n");
 
-	/*cudaMemcpy(image_array_r, gpu_array_r, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
-	cudaMemcpy(image_array_g, gpu_array_g, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
-	cudaMemcpy(image_array_b, gpu_array_b, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
-	printf("done memcopy2\n");*/
-
-	cudaMemcpy(out_array_r, gpu_out_r, sizeof(unsigned char)*(width)*(height ), cudaMemcpyDeviceToHost);
-	cudaMemcpy(out_array_g, gpu_out_g, sizeof(unsigned char)*(width )*(height ), cudaMemcpyDeviceToHost);
-	cudaMemcpy(out_array_b, gpu_out_b, sizeof(unsigned char)*(width )*(height ), cudaMemcpyDeviceToHost);
-	printf("done memcopy3\n");
+	// Copy data back from gpu
+	cudaMemcpy(cpu_pixel, gpu_pixel, sizeof(uchar3)*(width)*(height), cudaMemcpyDeviceToHost);
+		// Initial implementation
+		/*cudaMemcpy(image_array_r, gpu_array_r, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
+		cudaMemcpy(image_array_g, gpu_array_g, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
+		cudaMemcpy(image_array_b, gpu_array_b, sizeof(unsigned char)*(width)*(height), cudaMemcpyDeviceToHost);
+		printf("done memcopy2\n");*/
+		/*cudaMemcpy(out_array_r, gpu_out_r, sizeof(unsigned char)*(width)*(height ), cudaMemcpyDeviceToHost);
+		cudaMemcpy(out_array_g, gpu_out_g, sizeof(unsigned char)*(width )*(height ), cudaMemcpyDeviceToHost);
+		cudaMemcpy(out_array_b, gpu_out_b, sizeof(unsigned char)*(width )*(height ), cudaMemcpyDeviceToHost);
+		printf("done memcopy3\n");*/
 
 	// end timing here
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&mseconds, start, stop);
+
 	printf("CUDA mode execution time took %d s and %d ms\n", (int)mseconds / 1000, (int)mseconds % 1000);
 
 	printf("cpu_average_r total is %i \n", total_r / (width*height));
 	printf("cpu_average_g total is %i \n", total_g / (width*height));
 	printf("cpu_average_b total is %i \n", total_b / (width*height));
 
+	// Improvement
+	// Copy data back to the initial format so that the output function still works
+	for (int i = 0; i < width*height; i++) {
+		out_array_r[i] = cpu_pixel[i].x;
+		out_array_g[i] = cpu_pixel[i].y;
+		out_array_b[i] = cpu_pixel[i].z;
+	}
 
 	// Free GPU memory
-	cudaFree(gpu_array_r);
-	cudaFree(gpu_array_g);
-	cudaFree(gpu_array_b);
-	cudaFree(gpu_out_r);
-	cudaFree(gpu_out_g);
-	cudaFree(gpu_out_b);
+		// First implementation
+		/*cudaFree(gpu_array_r);
+		cudaFree(gpu_array_g);
+		cudaFree(gpu_array_b);
+		cudaFree(gpu_out_r);
+		cudaFree(gpu_out_g);
+		cudaFree(gpu_out_b);*/
+	cudaFree(gpu_pixel);
+	free(cpu_pixel);
 
 	// cleanup
 	cudaEventDestroy(start);
@@ -914,7 +947,7 @@ int main(int argc, char *argv[]) {
 			if (cuda_process_output_file(tile_size) != SUCCESS) {
 				printf("There was a problem processing the output file");
 			}
-			getchar();
+			//getchar();
 			break;
 		}
 		case (ALL): {
